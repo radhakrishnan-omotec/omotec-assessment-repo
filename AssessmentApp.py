@@ -180,6 +180,7 @@ def evaluator_section(df_main):
         trainer_id = ""
         trainer_name = ""
         department = ""
+        trainer_email = ""
 
         if mode.startswith("Enter"):
             try:
@@ -197,7 +198,12 @@ def evaluator_section(df_main):
                     trainer_id = trainer_data.get("Trainer ID", "")
                     trainer_name = trainer_data.get("Trainer Name", "")
                     department = trainer_data.get("Department", "")
+                    trainer_email = trainer_data.get("Email", "")
                     st.success(f"Loaded Trainer: {trainer_name} ({department})")
+                    if trainer_email:
+                        st.info(f"Trainer Email: {trainer_email}")
+                    else:
+                        st.warning("No email found for this trainer in EVALUATOR_INPUT.csv")
                 else:
                     st.error("EVALUATOR_INPUT.csv not found.")
                     return
@@ -210,8 +216,9 @@ def evaluator_section(df_main):
             trainer_id = st.text_input("Enter New Trainer ID (leave blank to auto-generate)")
             trainer_name = st.text_input("Trainer Name (for new ID)")
             department = st.text_input("Department (for new ID)")
+            trainer_email = st.text_input("Trainer Email (for new ID)")
             if trainer_id.strip() == "":
-                if trainer_name and department:
+                if trainer_name and department and trainer_email:
                     try:
                         trainer_id = generate_new_trainer_id()
                         st.success(f"Auto-generated Trainer ID: {trainer_id}")
@@ -221,16 +228,17 @@ def evaluator_section(df_main):
                         logger.error(f"Error creating new trainer: {str(e)}")
                         st.error("Failed to create new trainer.")
                 else:
-                    st.warning("Please enter both Trainer Name and Department to auto-generate Trainer ID.")
+                    st.warning("Please enter Trainer Name, Department, and Email to auto-generate Trainer ID.")
 
         past_assessments = df[df["Trainer ID"] == trainer_id] if trainer_id else pd.DataFrame()
         if not past_assessments.empty:
             st.markdown("### 🔁 Previous Assessments")
-            st.dataframe(past_assessments)
+            st.dataframe(past_assessments, use_container_width=True)
 
         levels = ["LEVEL #1", "LEVEL #2", "LEVEL #3"]
         level_status = {}
         submissions = {}
+        assessment_data = {}
 
         try:
             for level in levels:
@@ -247,8 +255,6 @@ def evaluator_section(df_main):
             logger.error(f"Error processing level statuses: {str(e)}")
             st.error("Failed to process assessment levels.")
 
-        manager_referral = ""
-
         for level in levels:
             with st.expander(f"🔹 {level} Assessment"):
                 try:
@@ -260,46 +266,77 @@ def evaluator_section(df_main):
                         if level == "LEVEL #1" or (level == "LEVEL #2" and level_status.get("LEVEL #1") == "QUALIFIED") or \
                            (level == "LEVEL #3" and level_status.get("LEVEL #2") == "QUALIFIED"):
                             part_params = [p for p in relevant_params[evaluator_role] if any(p in col for col in df.columns)]
-                            part = {k: st.text_input(k, value=past_assessments[k].iloc[0] if not past_assessments.empty else "") for k in part_params}
+                            part = {}
+                            for k in part_params:
+                                value = past_assessments[k].iloc[0] if not past_assessments.empty and k in past_assessments.columns else ""
+                                part[k] = st.text_input(k, value=value, key=f"{k}_{level}_{trainer_id}")
                             level_status_key = f"{level}_status_{evaluator_role}"
                             status = st.selectbox(f"{level} Status", ["QUALIFIED", "NOT QUALIFIED"], key=level_status_key)
+                            manager_referral = ""
                             if level == "LEVEL #3":
-                                manager_referral = st.text_input("Manager Referral (Required for Level 3)")
+                                manager_referral = st.text_input("Manager Referral (Required for Level 3)", key=f"manager_referral_{level}_{trainer_id}")
+                            
+                            # Per-level assessment inputs
+                            total = st.number_input("TOTAL", min_value=0, max_value=100, step=1, key=f"total_{level}_{trainer_id}")
+                            avg = st.number_input("AVERAGE", min_value=0.0, max_value=100.0, step=0.1, key=f"avg_{level}_{trainer_id}")
+                            status_overall = st.selectbox("STATUS", ["CLEARED", "REDO"], key=f"status_{level}_{trainer_id}")
+                            reminder = st.text_area("Reminder", key=f"reminder_{level}_{trainer_id}")
+                            reminder_email = st.text_input("Evaluator Email for Reminder", key=f"reminder_email_{level}_{trainer_id}")
+                            if reminder_email:
+                                send_email_reminder(reminder_email)
+
+                            # Send Score Card button for this level
+                            send_report_enabled = level_status.get(level) == "QUALIFIED" and submissions.get(f"{level}_submissions", 0) >= 2
+                            score_status = st.selectbox(
+                                "Status of Score Card",
+                                ["Score Cards has not been sent"] if not send_report_enabled else ["Score Cards has been sent", "Score Cards has not been sent"],
+                                key=f"score_status_{level}_{trainer_id}",
+                                help="Select the status of the score card. 'Score Cards has not been sent' enables sending."
+                            )
+                            send_score_card_disabled = score_status != "Score Cards has not been sent"
+                            if st.button("SEND SCORE CARD", disabled=send_score_card_disabled, key=f"send_score_card_{level}_{trainer_id}"):
+                                try:
+                                    if not trainer_email or '@' not in trainer_email:
+                                        st.error("No valid trainer email found. Please ensure the trainer's email is provided in EVALUATOR_INPUT.csv or during new trainer creation.")
+                                    else:
+                                        email_body = f"Score Card for Trainer ID: {trainer_id}\n"
+                                        email_body += f"Trainer Name: {trainer_name}\n"
+                                        email_body += f"Department: {department}\n"
+                                        email_body += f"Date of Assessment: {datetime.today().date()}\n"
+                                        email_body += f"Evaluator: {evaluator_username} ({evaluator_role})\n"
+                                        email_body += f"\nAssessment Details for {level}:\n"
+                                        for param in part_params:
+                                            email_body += f"{param}: {part.get(param, 'N/A')}\n"
+                                        email_body += f"{level} Status: {status}\n"
+                                        email_body += f"TOTAL: {total}\nAVERAGE: {avg}\nSTATUS: {status_overall}\n"
+                                        if manager_referral and level == "LEVEL #3":
+                                            email_body += f"Manager Referral: {manager_referral}\n"
+                                        email_body += f"Reminder: {reminder or 'None'}"
+                                        email_subject = f"Score Card for Trainer {trainer_id} - {level} - {datetime.today().date()}"
+                                        mailto_link = f"mailto:{urllib.parse.quote(trainer_email)}?subject={urllib.parse.quote(email_subject)}&body={urllib.parse.quote(email_body)}"
+                                        st.markdown(f'<a href="{mailto_link}" target="_blank">Open Email Client</a>', unsafe_allow_html=True)
+                                        st.success(f"Score card email prepared for Trainer ID: {trainer_id} to {trainer_email} for {level}")
+                                        score_status = "Score Cards has been sent"
+                                        st.session_state[f"score_status_{level}_{trainer_id}"] = score_status
+                                except Exception as e:
+                                    logger.error(f"Error sending score card for {level}: {str(e)}")
+                                    st.error(f"Failed to prepare score card email for {level}.")
+
+                            assessment_data[level] = {
+                                "params": part,
+                                "level_status": status,
+                                "manager_referral": manager_referral if level == "LEVEL #3" else "",
+                                "total": total,
+                                "average": avg,
+                                "status_overall": status_overall,
+                                "reminder": reminder,
+                                "score_status": score_status
+                            }
                 except Exception as e:
                     logger.error(f"Error in {level} assessment: {str(e)}")
                     st.error(f"Failed to process {level} assessment.")
 
-        send_report_enabled = all(level_status.get(level) == "QUALIFIED" and submissions.get(f"{level}_submissions", 0) >= 2 for level in levels)
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            score_status = st.selectbox("Status of Score Card", 
-                                      ["Score Cards has not been sent"] if not send_report_enabled else ["Score Cards has been sent", "Score Cards has not been sent"],
-                                      key="score_status")
-        with col2:
-            send_score_card_disabled = score_status != "Score Cards has not been sent"
-            if st.button("SEND SCORE CARD", disabled=send_score_card_disabled):
-                try:
-                    # Enhancement: Open default email client with pre-filled compose window
-                    email_body = f"Score Card for Trainer ID: {trainer_id}\nTrainer Name: {trainer_name}\nDepartment: {department}\nStatus: {score_status}"
-                    email_subject = f"Score Card for Trainer {trainer_id}"
-                    mailto_link = f"mailto:?subject={urllib.parse.quote(email_subject)}&body={urllib.parse.quote(email_body)}"
-                    st.markdown(f'<a href="{mailto_link}" target="_blank">Open Email Client</a>', unsafe_allow_html=True)
-                    st.success(f"Score card prepared for Trainer ID: {trainer_id} (Email client opened)")
-                    score_status = "Score Cards has been sent"
-                    st.session_state["score_status"] = score_status
-                except Exception as e:
-                    logger.error(f"Error sending score card: {str(e)}")
-                    st.error("Failed to prepare score card email.")
-
-        total = st.number_input("TOTAL", min_value=0)
-        avg = st.number_input("AVERAGE", min_value=0.0, step=0.1)
-        status = st.selectbox("STATUS", ["CLEARED", "REDO"])
-        reminder = st.text_area("Reminder")
-        email = st.text_input("Evaluator Email for Reminder")
-        if email:
-            send_email_reminder(email)
-
-        if st.button("💾 Submit Evaluation"):
+        if st.button("💾 Submit Evaluation", key="submit_evaluation"):
             try:
                 if not trainer_id:
                     st.error("❌ Trainer ID is required.")
@@ -318,34 +355,33 @@ def evaluator_section(df_main):
 
                 for level in levels:
                     if level_status.get(level) != "QUALIFIED" or submissions.get(f"{level}_submissions", 0) < 2:
-                        params = [p for p in relevant_params[evaluator_role] if any(p in col for col in df.columns)]
-                        for param in params:
-                            entry[param] = part.get(param, "")
-                        entry[level] = st.session_state.get(f"{level}_status_{evaluator_role}", "NOT QUALIFIED")
-                        if level == "LEVEL #3" and manager_referral:
-                            entry["Manager Referral"] = manager_referral
+                        data = assessment_data.get(level, {})
+                        for param in data.get("params", {}):
+                            entry[param] = data["params"].get(param, "")
+                        entry[level] = data.get("level_status", "NOT QUALIFIED")
+                        if level == "LEVEL #3" and data.get("manager_referral"):
+                            entry["Manager Referral"] = data["manager_referral"]
+                        entry["TOTAL"] = data.get("total", 0)
+                        entry["AVERAGE"] = data.get("average", 0.0)
+                        entry["STATUS"] = data.get("status_overall", "REDO")
+                        entry["Status of Score Card"] = data.get("score_status", "Score Cards has not been sent")
+                        entry["Reminder"] = data.get("reminder", "")
                         break
 
-                entry.update({
-                    "TOTAL": total, "AVERAGE": avg, "STATUS": status,
-                    "Status of Score Card": score_status,
-                    "Reminder": reminder
-                })
-
                 # Enforce Qualification Criteria
-                if entry["LEVEL #1"] == "QUALIFIED" and submissions.get("LEVEL #1_submissions", 0) >= 2:
+                if entry.get("LEVEL #1") == "QUALIFIED" and submissions.get("LEVEL #1_submissions", 0) >= 2:
                     courses_completed = past_assessments.shape[0]
-                    if courses_completed < 10 or avg < 75.0:
+                    if courses_completed < 10 or entry.get("AVERAGE", 0.0) < 75.0:
                         entry["LEVEL #1"] = "NOT QUALIFIED"
                         st.warning("Level 1 requires 10 courses with at least 75% average.")
-                if entry["LEVEL #2"] == "QUALIFIED" and submissions.get("LEVEL #2_submissions", 0) >= 2:
+                if entry.get("LEVEL #2") == "QUALIFIED" and submissions.get("LEVEL #2_submissions", 0) >= 2:
                     courses_completed = past_assessments.shape[0]
-                    if courses_completed < 10 or avg < 80.0:
+                    if courses_completed < 10 or entry.get("AVERAGE", 0.0) < 80.0:
                         entry["LEVEL #2"] = "NOT QUALIFIED"
                         st.warning("Level 2 requires 10 courses with at least 80% average.")
-                if entry["LEVEL #3"] == "QUALIFIED" and submissions.get("LEVEL #3_submissions", 0) >= 2:
+                if entry.get("LEVEL #3") == "QUALIFIED" and submissions.get("LEVEL #3_submissions", 0) >= 2:
                     courses_completed = past_assessments.shape[0]
-                    if courses_completed < 5 or avg < 90.0 or not manager_referral:
+                    if courses_completed < 5 or entry.get("AVERAGE", 0.0) < 90.0 or not entry.get("Manager Referral"):
                         entry["LEVEL #3"] = "NOT QUALIFIED"
                         st.warning("Level 3 requires 5 courses with 90% average + Manager Referral.")
 
@@ -356,7 +392,7 @@ def evaluator_section(df_main):
                 logger.error(f"Error submitting evaluation: {str(e)}")
                 st.error("Failed to submit evaluation. Please try again.")
 
-        if st.button("Logout"):
+        if st.button("Logout", key="evaluator_logout"):
             try:
                 for key in ["logged_in", "role", "logged_user"]:
                     if key in st.session_state:
@@ -378,43 +414,59 @@ def viewer_section(df_main):
             st.warning("Please login to access the viewer dashboard.")
             return
 
-        branch = st.selectbox("Select Branch", options=["", "Lokhandwala", "Juhu", "Laxmi", "Malad", "Pune", "Bangalore", "Nagpur"])
-        department = st.selectbox("Select Department", options=["", "Coding", "Mechanical", "Design Thinking", "Electronics", "AI & Analytics"])
+        st.markdown("### 🔍 Filter Assessments")
+        branch = st.selectbox("Select Branch", options=["", "Lokhandwala", "Juhu", "Laxmi", "Malad", "Pune", "Bangalore", "Nagpur"], key="viewer_branch")
+        department = st.selectbox("Select Department", options=["", "Coding", "Mechanical", "Design Thinking", "Electronics", "AI & Analytics"], key="viewer_department")
+        search_term = st.text_input("Search by Trainer Name or ID", key="viewer_search", help="Enter a name or ID to filter trainers.")
 
         if os.path.exists(DEFAULT_DATA_FILE):
-            eval_inputs_df = pd.read_csv(DEFAULT_DATA_FILE).fillna("")
-            if "Trainer ID" in eval_inputs_df.columns and "Trainer Name" in eval_inputs_df.columns and "Branch" in eval_inputs_df.columns and "Department" in eval_inputs_df.columns:
+            try:
+                eval_inputs_df = pd.read_csv(DEFAULT_DATA_FILE).fillna("")
+                if "Trainer ID" not in eval_inputs_df.columns or "Trainer Name" not in eval_inputs_df.columns or "Branch" not in eval_inputs_df.columns or "Department" not in eval_inputs_df.columns:
+                    st.error("❌ Required columns missing in EVALUATOR_INPUT.csv.")
+                    return
                 filtered_trainers = eval_inputs_df.copy()
-                if branch and department:
-                    filtered_trainers = filtered_trainers[(filtered_trainers["Branch"] == branch) & (filtered_trainers["Department"] == department)]
-                    if filtered_trainers.empty:
-                        st.warning("No trainers for the below Branch and Department are not present in CSV file")
-                        trainer_name = ""
-                    else:
-                        trainer_name = st.selectbox("Select Trainer Name", options=[""] + sorted(filtered_trainers["Trainer Name"].unique().tolist()))
+                if branch:
+                    filtered_trainers = filtered_trainers[filtered_trainers["Branch"] == branch]
+                if department:
+                    filtered_trainers = filtered_trainers[filtered_trainers["Department"] == department]
+                if search_term:
+                    filtered_trainers = filtered_trainers[
+                        filtered_trainers["Trainer Name"].str.contains(search_term, case=False, na=False) |
+                        filtered_trainers["Trainer ID"].str.contains(search_term, case=False, na=False)
+                    ]
+                if filtered_trainers.empty:
+                    st.warning("No trainers match the selected filters.")
+                    trainer_name = ""
                 else:
-                    trainer_name = st.selectbox("Select Trainer Name", options=[""] + sorted(eval_inputs_df["Trainer Name"].dropna().unique().tolist()))
-            else:
-                st.error("❌ Required columns missing in EVALUATOR_INPUT.csv.")
-                trainer_name = ""
+                    trainer_name = st.selectbox("Select Trainer Name", options=[""] + sorted(filtered_trainers["Trainer Name"].unique().tolist()), key="viewer_trainer")
+            except Exception as e:
+                logger.error(f"Error filtering trainers: {str(e)}")
+                st.error("Failed to load trainer data.")
+                return
         else:
             st.error("EVALUATOR_INPUT.csv not found.")
-            trainer_name = ""
+            return
 
         df = df_main.copy()
         if trainer_name and os.path.exists(CSV_FILE):
-            trainer_id = eval_inputs_df[eval_inputs_df["Trainer Name"] == trainer_name]["Trainer ID"].iloc[0]
-            trainer_report = df[df["Trainer ID"] == trainer_id]
-            if not trainer_report.empty:
-                st.markdown("### 📋 Assessment Records")
-                st.dataframe(trainer_report, use_container_width=True)
-            else:
-                st.warning("No assessment records found for the selected trainer.")
+            try:
+                trainer_id = eval_inputs_df[eval_inputs_df["Trainer Name"] == trainer_name]["Trainer ID"].iloc[0]
+                trainer_report = df[df["Trainer ID"] == trainer_id]
+                if not trainer_report.empty:
+                    st.markdown("### 📋 Assessment Records")
+                    st.dataframe(trainer_report, use_container_width=True)
+                    st.markdown(f"**Trainer ID:** {trainer_id} | **Name:** {trainer_name} | **Department:** {department or 'N/A'} | **Branch:** {branch or 'N/A'}")
+                else:
+                    st.warning("No assessment records found for the selected trainer.")
+            except Exception as e:
+                logger.error(f"Error loading trainer report: {str(e)}")
+                st.error("Failed to load assessment records.")
 
         if trainer_name and not trainer_report.empty:
             col1, col2 = st.columns(2)
             with col1:
-                if st.button("📥 Download Trainer Data as CSV"):
+                if st.button("📥 Download Trainer Data as CSV", key="download_csv"):
                     try:
                         csv = trainer_report.to_csv(index=False)
                         b64 = base64.b64encode(csv.encode()).decode()
@@ -424,7 +476,7 @@ def viewer_section(df_main):
                         logger.error(f"Error downloading CSV: {str(e)}")
                         st.error("Failed to download CSV file.")
             with col2:
-                if st.button("📄 Download Trainer Data as PDF"):
+                if st.button("📄 Download Trainer Data as PDF", key="download_pdf"):
                     try:
                         latex_content = r"""
                         \documentclass{article}
@@ -453,17 +505,22 @@ def viewer_section(df_main):
                         with open("trainer_report.tex", "w") as f:
                             f.write(latex_content)
                         with open("trainer_report.tex", "rb") as f:
-                            b64 = base64.b64encode(f.read()).decode()
-                            href = f'<a href="data:application/x-latex;base64,{b64}" download="trainer_{trainer_id}_assessment.pdf">Download PDF</a>'
-                            st.markdown(href, unsafe_allow_html=True)
+                            pdf_data = f.read()
+                        st.download_button(
+                            label="Download Trainer Data as PDF",
+                            data=pdf_data,
+                            file_name=f"trainer_{trainer_id}_assessment.pdf",
+                            mime="application/x-latex"
+                        )
+                        st.success("PDF download initiated.")
                     except Exception as e:
                         logger.error(f"Error generating PDF: {str(e)}")
                         st.error("Failed to generate PDF report.")
 
-        if st.button("View All Trainers"):
+        if st.button("View All Trainers", key="view_all_trainers"):
             try:
                 if os.path.exists(DEFAULT_DATA_FILE):
-                    all_trainers = eval_inputs_df[["Trainer ID", "Trainer Name"]].drop_duplicates()
+                    all_trainers = eval_inputs_df[["Trainer ID", "Trainer Name", "Department", "Branch"]].drop_duplicates()
                     st.markdown("### 🆔 All Trainers")
                     st.dataframe(all_trainers, use_container_width=True)
                 else:
@@ -472,7 +529,7 @@ def viewer_section(df_main):
                 logger.error(f"Error viewing all trainers: {str(e)}")
                 st.error("Failed to display trainer list.")
 
-        if st.button("Logout"):
+        if st.button("Logout", key="viewer_logout"):
             try:
                 for key in ["logged_in", "role", "logged_user"]:
                     if key in st.session_state:
@@ -680,7 +737,7 @@ def admin_section(df_main):
                             logger.error(f"Error generating PDF report: {str(e)}")
                             st.error("Failed to generate PDF report.")
 
-        if st.button("Logout"):
+        if st.button("Logout", key="admin_logout"):
             try:
                 for key in ["logged_in", "role", "logged_user"]:
                     if key in st.session_state:
